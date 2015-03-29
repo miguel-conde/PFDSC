@@ -51,7 +51,7 @@ This report is organized as follows:
 - <a href="#guidelines">Guidelines for implementing a prediction algorithm</a>
 - <a href="#algorithm">Implementing a first simple back off prediction algorithm</a>
 
-
+The R code used can be found at [github](https://github.com/miguel-conde/PFDSC)
 
 ## <a name="the_data">2. The Data</a>
 
