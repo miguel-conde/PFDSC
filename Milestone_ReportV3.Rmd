@@ -1,0 +1,580 @@
+---
+title: "Data Science Capstone - Milestone Report"
+date: "Friday, March 27, 2015"
+output: html_document
+---
+
+```{r sources_and_libraries, results='hide', message=FALSE, warning=FALSE, echo = FALSE}
+source("getDataFiles.R")
+source("sampleFiles.R")
+source("managePunct.R")
+source("statsNWordGrams.R")
+source("multiplot.R")
+source("histNWordGrams.R")
+library(ggplot2)
+library(scales)
+library(grid)
+library(stringi)
+library(tm)
+library(RWeka)
+library(zipfR)
+
+```
+
+
+## 1. Executive summary
+
+The goal of the Capstone Project is to create a predictive text product, that implements a predictive text model and algorithm built from analyzing a large corpus of text documents, to provide an interface that can be accessed by others.
+
+During the last few weeks the following tasks have been accomplished:
+
+- Data has been downloaded.
+- A preliminary Exploratory Analysis has been performed.
+- Tokenization has been carried out, using different R packages and regular expressions.
+- A set of resources about Natural Language Processing has been gathered and studied.
+- An in-depth Exploratory Analysis was carried out, using that previously learned and using some R packages, and conclusions have been derived.
+- First conclusions to set up a prediction algorithm has been outlined.
+- Based on those conclussions, a first prediction algorithm (simple back off) has been implemented and it's being tested.
+
+This report is organized as follows:
+
+- <a href="#the_data">The Data</a>
+    + <a href="#downloading">Downloading</a>
+    + <a href="#FEA">First Exploratory Analysis</a>
+    + <a href="#tokenization">Tokenization and cleaning</a>
+- <a href="#exploring_the_data">Exploring the Data</a>
+    + <a href="#terms_frequencies">Terms Frequencies</a>
+    + <a href="#terms_spectrum">Terms Spectrum</a>
+    + <a href="#ram_estimations">RAM estimations</a>
+    + <a href="#conclusions">Conclusions</a>
+- <a href="#NLP">Resources about Natural Language Processing</a>
+- <a href="#guidelines">Guidelines for implementing a prediction algorithm</a>
+- <a href="#algorithm">Implementing a first simple back off prediction algorithm</a>
+
+
+
+## <a name="the_data">2. The Data</a>
+
+### <a name="downloading">2.1 Downloading</a>
+
+The data is from a corpus called HC Corpora ([www.corpora.heliohost.org][1]). See the readme file at [http://www.corpora.heliohost.org/aboutcorpus.html][2] for details on the corpora available. It will be downloaded from Coursera ([Capstone Dataset][7])
+
+The files are named LOCALE.[blogs|news|twitter].txt where LOCALE is the each of the four locales en_US, de_DE, ru_RU and fi_FI. 
+
+Compressed data files were downloaded. We had to be careful with files codification, and chose to read them as "UTF-8". 
+
+```{r file_list, echo = FALSE}
+dataDirectory <- file.path(".","data")
+zipFile <- file.path(dataDirectory, "Coursera-SwiftKey.zip")
+unzip(zipfile = zipFile, list = TRUE)
+```
+
+
+### <a name="FEA">2.2 First Exploratory Analysis</a>
+
+Next, we need to get familiar with the data.
+
+We are going to work with the "en_US" text files using a representative sample subset of the data, randomly selecting rows to be included in the samples.
+
+To accomplish this we first made some first statistics about the size and composition of the files.
+
+```{r files_stats, cache = TRUE, echo = FALSE, results='hide'}
+EN_blogs_file <- file.path(dataDirectory, "final", "en_US", 
+                           "en_US.blogs.txt")
+EN_news_file <- file.path(dataDirectory, "final", "en_US", 
+                          "en_US.news.txt")
+EN_twitter_file <- file.path(dataDirectory, "final", "en_US", 
+                             "en_US.twitter.txt")
+
+## BLOGS
+lines <- readLines(EN_blogs_file, encoding = "UTF-8")
+
+stats_lines_blogs <- stri_stats_general(lines)
+
+## NEWS
+con <- file(EN_news_file, open = "rb", 
+            encoding = "UTF-8")
+lines <- readLines(con, encoding = "UTF-8")
+close(con)
+
+stats_lines_news <- stri_stats_general(lines)
+
+## TWITTER
+
+lines <- readLines(EN_twitter_file, encoding = "UTF-8", skipNul = TRUE)
+
+stats_lines_twitter <- stri_stats_general(lines)
+
+rm(lines)
+```
+
+| File     |  NLines                       | NChars                        |
+|:--------:|:-----------------------------:|:-----------------------------:|
+| Blogs    | `r stats_lines_blogs["Lines"]`    | `r stats_lines_blogs["Chars"]`    |
+| News     | `r stats_lines_news["Lines"]`     | `r stats_lines_news["Chars"]`     |
+| Twitter  | `r stats_lines_twitter["Lines"]`  | `r stats_lines_twitter["Chars"]`  |
+
+Simply at first glance, we realize that (A) we're going to work with very large text files; and (B) the diversity of the texts (punctuation, emoticons, hashtags misspelling, synonyms) is really huge.
+
+We can think in samples with 10.000 lines (more or less, and just as a rule of thumb, the margin of error would be $1/\sqrt{10000} = 1\%$). 10.000 is 0.42 % of 2360148 (the number of lines in twitters file). Finally we used a sample size ten times larger.
+
+We made the sampling using a customized function and obtained 3 sampled text files containing 5% random lines of each blogs, news and twitters data text files.
+
+
+### <a name="tokenization">2.3 Tokenization and cleaning</a>
+
+As said before, reviewing the lines in the sample we realized we needed to perform "a bit"" of cleaning before tokenization to deal with punctuation, white spaces, upper/lower case characters, emoticons, non-printable characters an so on. This has been done with the a special-purpose function (extensively using regular expressions and `gsub()`), that is later employed by the `tm` package tools to build 1, 2 and 3-grams Term-Document Matrixes (**TDM**) from the sampled data files, as the starting point for our in-depth exploration. As tokenizer we used `NGramTokenizer()` from `RWeka`package.
+
+- Numbers, hashtags, twitter users and e-mail adresses have been labeled.
+- Ten types of emoticons have been considered.
+- Non printable and most of puntuaction characters have been removed (except thoe joining words and those finishing phrases).
+- Whitespaces have been stripped.
+- Everything have been converted to lowercase.
+
+## <a name="exploring_the_data">3. Exploring the Data</a>
+
+### <a name="terms_frequencies">3.1 Terms Frequencies</a>
+
+Now we have 1, 2 and 3-Grams TDMs. As an example, see a 2-Wordgrams TDM:
+
+```{r N_grams_examples, echo = FALSE}
+corpus_and_TDMs_directory <- "corpus_and_TDMs"
+corpusFile <- file.path(corpus_and_TDMs_directory, "en_US.RData")
+tdm1GFile  <- file.path(corpus_and_TDMs_directory, "tdm_1G.RData")
+tdm2GFile  <- file.path(corpus_and_TDMs_directory, "tdm_2G.RData")
+tdm3GFile  <- file.path(corpus_and_TDMs_directory, "tdm_3G.RData")
+load(tdm2GFile)
+#as.matrix(tdm_1G)[10000:10010,]
+as.matrix(tdm_2G)[20000:20010,]
+#as.matrix(tdm_3G)[40000:40010,]
+
+rm(tdm_2G)
+```
+
+Each TDM shows, by file, a **Term Frequency List**. Each entry in this table shows the **count** of each *term* (or *type*) instances, i.e., the count of its *tokens*.
+
+Let's begin our exploratory data analysis with some stats from the 1-grams TDMs.  We've obtained the % of corpus coverage by trial and error. Below you can see an example for a 95% tokens coverage:
+
+```{r stats_example, echo = FALSE}
+load(tdm1GFile)
+statsNWordGrams(tdm_1G, "sample_blogs.txt", 6)
+statsNWordGrams(tdm_1G, "sample_news.txt", 5)
+statsNWordGrams(tdm_1G, "sample_twitter.txt", 5)
+```
+
+As you can see, this stats show a very skewed distribution of the types:
+
+- Most of terms are on the last 1% (less frequent)
+- With just a few tokens we can cover a lot of terms:
+
+| Coverage: |  50%   | 90%   | 95%    |
+|:---------:|:------:|:-----:|:------:|
+| Blogs     |  0.14% |  9.0% | 20.9%  |
+| News      |  0.26% | 11.1% | 25.0%  |
+| Twitter   |  0.16% |  7.3% | 17.0%  |
+| Total     |  0.09% |  4.6% | 11.8%  |
+
+This means that, choosing as dictionary the set of Corpus Terms that appear at least 50 times (cut off, 4.6% of terms), we have a tokens coverage of 90%. Or choosing as dictionary the set of Corpora Terms that appears at least 12 times, we have a tokens coverage of 95%.
+
+2G and 3G are different: e.g., if i choose even count cut off = 2 for 2G, coverage falls fromm 100% (count = 1) to 76.48%.
+
+These are the the first 20 more frequent terms in US_en_sample Corpus:
+
+```{r get_dictionary_1G, echo = FALSE}
+dictionary <- findFreqTerms(tdm_1G, 50)
+writeLines(sprintf("Words in dictionary: %d\n", length(dictionary)))
+
+# Build a 1-Wordgrams matrix with just the types in the dictionary
+m_tdm_1G <- as.matrix(tdm_1G)
+m_tdm_1G <- m_tdm_1G[dictionary, ]
+m_tdm_1G <- cbind(m_tdm_1G, TOTAL = apply(m_tdm_1G,1,sum))
+
+# Order it
+m_tdm_1G <- m_tdm_1G[order(m_tdm_1G[, "TOTAL"], decreasing = TRUE),]
+dictionary <- rownames(m_tdm_1G) 
+m_tdm_1G[1:20,]
+
+```
+
+Let's use our 90% dictionary to make some plots by frequency rank:
+
+```{r plot_1G, fig.align='center', echo = FALSE}
+my_data <- as.data.frame(m_tdm_1G)[1:100,]
+
+ggplot(data=my_data, 
+       aes(x=reorder(rownames(my_data), TOTAL, decreasing = FALSE), 
+           y=(TOTAL))) +  
+  geom_bar(stat="identity", fill="#FF9999", colour="black") + 
+  coord_flip() +  
+  xlab("100 more used Types") + 
+  ylab("Count") + 
+  ggtitle("100 more frequent Terms in Corpus US_en sample") +
+  scale_fill_discrete("red")
+```
+
+```{r plot_1G_2, fig.align='center', echo = FALSE}
+m_tdm_1G <- m_tdm_1G[order(m_tdm_1G[, "sample_blogs.txt"], decreasing = TRUE),]
+my_data <- as.data.frame(m_tdm_1G)[1:100,]
+
+ggplot(data=my_data, 
+       aes(x=reorder(rownames(my_data), sample_blogs.txt, decreasing = FALSE), 
+           y=(sample_blogs.txt))) +  
+  geom_bar(stat="identity", fill="#FF9999", colour="black") + 
+  coord_flip() +  
+  xlab("100 more used Types") + 
+  ylab("Count") + 
+  ggtitle("100 more frequent Terms in Blogs US_en sample") +
+  scale_fill_discrete("red")
+```
+
+```{r plot_1G_3, fig.align='center', echo = FALSE}
+m_tdm_1G <- m_tdm_1G[order(m_tdm_1G[, "sample_news.txt"], decreasing = TRUE),]
+my_data <- as.data.frame(m_tdm_1G)[1:100,]
+
+ggplot(data=my_data, 
+       aes(x=reorder(rownames(my_data), sample_news.txt, decreasing = FALSE), 
+           y=(sample_news.txt))) +  
+  geom_bar(stat="identity", fill="#FF9999", colour="black") + 
+  coord_flip() +  
+  xlab("100 more used Types") + 
+  ylab("Count") + 
+  ggtitle("100 more frequent Terms in News US_en sample") +
+  scale_fill_discrete("red")
+```
+
+```{r plot_1G_4, fig.align='center', echo = FALSE}
+m_tdm_1G <- m_tdm_1G[order(m_tdm_1G[, "sample_twitter.txt"], decreasing = TRUE),]
+my_data <- as.data.frame(m_tdm_1G)[1:100,]
+
+ggplot(data=my_data, 
+       aes(x=reorder(rownames(my_data), sample_twitter.txt, decreasing = FALSE), 
+           y=(sample_twitter.txt))) +  
+  geom_bar(stat="identity", fill="#FF9999", colour="black") + 
+  coord_flip() +  
+  xlab("100 more used Types") + 
+  ylab("Count") + 
+  ggtitle("100 more frequent Terms in Twitter US_en sample") +
+  scale_fill_discrete("red")
+```
+
+
+
+The more frquent type is "the": more than 4% of all the tokens are the term type "the".
+
+What we are seeing is the expression of [Zipf's Law][9]: *Zipf's law states that given some corpus of natural language utterances, the frequency of any word is inversely proportional to its rank in the frequency table. [...] Thus the most frequent word will occur approximately twice as often as the second most frequent word, three times as often as the third most frequent word, etc.*
+
+We can use `tm` function Zipf_plot`()` from `tm` package to explore the fit of this Law to our data:
+
+```{r plot_zip1, fig.align='center', echo = FALSE}
+Zipf_plot(tdm_1G, ylim = c(0,15), col = "red", type="p")
+
+```
+
+As shown, terms frequency fits quite well for terms appearing more than 4 times.
+
+
+### <a name="terms_spectrum">3.2 Terms Spectrum</a>
+
+Beyond  terms frequencies, we can now explore the frequency of frequencies. Some explanation is needed here:
+
+Let V = {w1,w2,w3,w4,w5} be our **VOCABULARY**. |V| = Card(V) = 5 **TERMS** or **TYPE TERMS**.
+
+Let T = (w1,w2,w1,w3,w3,w4,w3,w5,w1,w5) be our **TEXT**. N = 10 **TOKENS**.
+
+The **counts frequencies** and **counts densities** are:
+
+- c(w1) = 3; %c(w1) = c(w1) / N_t = 3/10
+- c(w2) = 1; %c(w1) = c(w2) / N_t = 1/10
+- c(w3) = 3; %c(w1) = c(w3) / N_t = 3/10
+- c(w4) = 1; %c(w1) = c(w4) / N_t = 1/10
+- c(w5) = 2; %c(w1) = c(w5) / N_t = 2/10
+
+For example, "c(w1) = 3; %; c(w1) = 3/10"" means that *30% of the corpus tokens are instanced by the term w1*. This counts is what we've been talking about in the last section.
+
+But now we'll wonder how many times a term appears "c" times.
+
+We can compute **frequencies of frecuencies** and **densities of frequencies**:
+
+- V_m=1 = 2; %V_m=1 = 2/5
+- V_m=2 = 1; %V_m=1 = 1/5
+- V_m=3 = 2; %V_m=1 = 2/5
+
+For example, V_m=1 = 2; %; V_m=1 = 2/5 means that *40% of the vocabulary terms  appear twice in the text*.
+
+This is also known as **frequency spectrum**.
+
+Here we have a 1-grams spectrum plot using `Heaps_plot()` function (package `tm`):
+
+```{r Heaps_plot, fig.align='center', echo = FALSE}
+Heaps_plot(tdm_1G, col = "red")
+```
+
+The red line is the observed spectrum while the black one is the spectrum as predicted by the [Heap's Law][17]: *Heaps' law  is an empirical law which describes the number of distinct words in a document (or set of documents) as a function of the document length (so called type-token relation). It can be formulated as:*
+
+$$
+V_R(n) = Kn^\beta
+$$
+
+It simply means that the vocabulary length |V| grows with the document length in a particular manner.
+
+Or, with `zipfR` package tools:
+
+```{r plot_zip3, fig.align='center', echo = FALSE}
+spc.twitter <- tfl2spc(tfl.twitter)
+plot(spc.twitter)
+```
+
+And, summing up:
+
+```{r histNWordGramsCorpus_function, echo = FALSE}
+histNWordGramsCorpus <- function(tdm, ...) {
+  
+  par(mfrow = c(2,2))
+  
+  # BLOGS
+  histNWordGrams(tdm, "sample_blogs.txt", ...)
+  
+  # NEWS
+  histNWordGrams(tdm, "sample_news.txt", ...)
+  
+  # TWITTER
+  histNWordGrams(tdm, "sample_twitter.txt", ...)
+  
+  # TOTAL
+  histNWordGrams(tdm, "TOTAL", ...)
+  
+  par(mfrow = c(1,1))
+}
+```
+
+```{r histNWordGramsCorpus, fig.align='center', echo = FALSE}
+# 1-grams
+histNWordGramsCorpus(tdm_1G, breaks = 200)
+```
+
+Frequency spectrum shape (HEap' Law) can be derived from Zipf Law. `zipfR` allows us to fit a finite Zipf-Mandelbrot model for the spectrum distribution (see ["LNRE modelling"][11]):
+
+```{r zipf_model, echo = FALSE}
+## compute Zipf-Mandelbrot model from twitter data
+## and look at model summary
+m.fzm <- lnre("fzm",spc.twitter)
+m.fzm
+```
+
+```{r zipf_model_exp_obs, fig.align='center', echo = FALSE}
+## plot observed and expected spectrum
+fzm.spc <- lnre.spc(m.fzm,N(spc.twitter))
+plot(spc.twitter,fzm.spc)
+```
+
+(predictions are red bars, observation the black ones)
+
+Although it appears to fit quite well, let's be careful with the low p-value produced by the model.
+
+Then, from the spectrum model we can derive a frequency Zipf-Mandelbrot model (see ["LNRE modelling"][11]):
+
+```{r modeling_freq, fig.align='center', echo = FALSE}
+prob_k <- function(k, C, b, a) {
+  res <- C / ((k + b)^a)
+  return(res)
+}
+
+a <- 1/m.fzm$param$alpha
+C <- (1 - m.fzm$param$alpha) / ((m.fzm$param$B)^(1- m.fzm$param$alpha)-(m.fzm$param$A)^(1- m.fzm$param$alpha))
+b <- C / (((m.fzm$param$B)^m.fzm$param$alpha) * m.fzm$param$alpha)
+
+p_obs <- tfl.twitter$f / sum(tfl.twitter$f)
+p_est <- sapply(1:40000, function(x) prob_k(x, C, b, a))
+
+plot(p_est,log = "y", type = "l", col ="red")
+lines(p_obs, col = "blue")
+```
+
+The blue line is the observed terms frequency, the red one is the predicted one.
+
+As announced by the low p-value, this model doesn't works fine. It's a pity because, with such a model at disposal, we'd probably be able to save a lot of RAM resources (no need to store frequencies, just store the ranked list of terms and calculate frequencies from the model).
+
+### <a name="ram_estimations">3.3 RAM Estimations (5% sample)</a>
+
+From the sizes of the TDMs obtained some estimations of RAM resources needed have been done:
+
+#### Twitter - 95% coverage
+```{r RAM_est_twitter1, echo = FALSE}
+load(tdm2GFile)
+load(tdm3GFile)
+d1G <- findFreqTerms(tdm_1G, 4)
+d2G <- findFreqTerms(tdm_2G, 4)
+d3G <- findFreqTerms(tdm_3G, 4)
+
+size_table_1G <- object.size(as.matrix(tdm_1G)[d1G, c(1,2)])
+size_table_2G <- 10*size_table_1G
+size_table_3G <- 2*size_table_2G
+size_tables <- size_table_1G + size_table_2G + size_table_3G
+
+writeLines(sprintf("RAM for 1-Wordgrams table: %.3f Mbytes", size_table_1G/2^20))
+writeLines(sprintf("RAM for 2-Wordgrams table: %.3f Mbytes", size_table_2G/2^20))
+writeLines(sprintf("RAM for 3-Wordgrams table: %.3f Mbytes", size_table_3G/2^20))
+writeLines("")
+writeLines(sprintf("Total RAM needed: %.3f Mbytes", size_tables/2^20))
+```
+
+
+
+### <a name="conclusions">3.4 Exploratory Analysis Conclusions</a>
+
+- The text files are really large. We should intensively work with **token samples**. 
+
+To get a statistically significant sample:
+
+We need to make N samples each with size n. Let's say N = 100 samples and n = 1000 tokens to have margin errors in the order of $1/\sqrt{1000} = 3\$".
+
+Let's take the twitter file as example. From our Exploratory Analysis we know this file has 1,888,118 lines and we extracted a 5% sample (94,406 lines) were we found 1,561,577 tokens, i.e., there are 13.23 tokens per line in average.
+
+So, to get a sample of 1,000 tokens i need 1,000 / 13.23 = 75.6 lines in average. As i want 100 samples, i need a sample of 7,560 lines.
+
+Of course, if i'm sampling 2-grams i'll need 15,120 lines; 22,680 lines for 3-grams and 30,240 for 4-grams.
+
+However, when i extract 1,000 tokens from 75.6 lines each token extraction is **NOT** independent from the previous ones. So we must be cautious and take action in anticipating that something goes wrong. So in each sample we'll extract *double* the number of the lines calculated for 4-grams by the procedure outlined above.
+
+These are the resulting numbers (% of each file i need to sample for N-grams):
+
+|File        |  1-grams   | 2-grams   | 3-grams   | 4-grams   |
+|:----------:|:----------:|:---------:|:---------:|:---------:|
+| Blogs      |    0.40%   |   0.70%   |   1.10%   |    1.40%  | 
+| News       |    0.40%   |   0.80%   |   1.20%   |    1.50%  |
+| Twitter    |    0.50%   |   0.90%   |   1.30%   |    1.70%  |
+
+- Terms frequency distribution allows to manage 95% of types with 21, 25, 17 and 12 % of terms (respectively for Blogs, News, Twitter and total corpus). We can use **reduced dictionaries** for efficiency sake. 
+
+    + However, the not so good results of fitting terms frequency dstribution by a Zipfs- Mandelbrott model indicate table frequency lists can't be substituted by probability calculations based on that model.
+
+- We must be careful with the last two conclusions, as vocabulary (number of types) *grows* with the length (number of tokens) of text. When working with samples we can choose reduced dictionaries to cover, for instance, 95% of tokens; but the same dictionaries will cover lower tokens % when working with larger samples.
+
+- RAM considerations: with 5% samples we need RAM allocation in the order of 50 - 100 Mbytes. Appropiated data structures and tools for fast search in tables must be considered. (e.g., `data.table` and `ff` packages)
+
+
+
+## <a name="NLP">4. Resources about Natural Language Processing</a>
+
+During the analysis, the following resources were studied:
+
+- [CRAN Task View: Natural Language Processing][5]: a comprehensive index of tools and resources in R to work with NPL
+- [R Programming/Text Processing][12]: This page includes all the material you need to deal with strings in R, specially regular expressions
+- [Natural language processing][6]: Coursera / Standford  NLP course. Extremely important material about basic text processing in Week 1 and language modelling in Week 2 materials. A PDF chapter  with the language modelling  issues can be found at:
+    + [Speech and Language Processing. Daniel Jurafsky & James H. Martin. Draft of September 1, 2014.][13]
+- Packages
+    + `tm`:  [Introduction to the tm Package - Text Mining in R][14]
+    + `zipfR`:  [zipfR: user-friendly LNRE modelling in R][15]
+    + `data.table`: [Introduction to the data.table package in R][16]
+
+## <a name="guidelines">5. Guidelines for implementing a prediction algorithm</a>
+
+From the above analysis and study, the following guidelines have been defined in a work plan (main reference: [Speech and Language Processing.][13]:
+
+1- **Divide corpus** (en_US.blogs.txt, en_US.news.txt and en_US.twitter.txt) into 3 disjoint and randomized sets:
+
+  - Training set
+  - Devset
+  - Test set
+  
+2- **Training**
+
+  - Add **seudowords** for 2 and 3-wordgrams at the extremes of sentences.
+  - Deal with **zeros** (things that don't occur in the training set but do occur in the testing set, i.e., **unknown** words or **out of vocabulary (OOV) words**.) **Open vocabulary** system strategy where we model these potential unknown words in the test set by adding a pseudo-word called $<UNK>$. 
+  - **Smoothing**: what do we do with words that are in our vocabulary (they are not unknown words) but appear in a test set in an unseen context (for example they appear after a word they never appeared after in training). To keep a language model from assigning zero probability to these unseen events, we’ll have to shave off a bit of probability mass from some more frequent events and give it to the events we’ve never seen. This  modification is called **smoothing** or **discounting**. 
+  - **Backoff** strategy
+  
+3- **Predict**
+
+I see two posibilities, the first easier to implement than the second:
+
+A - *Simple back off algorithm*
+
+From N-wordgrams TDMs we can build N-wordgrams count tables. They will be very sparse (many of the cells will be zero, i.e., not seen N-wordrams). We can transform these N-wordgrams count tables to N-wordgrams probability tables.
+
+(Perhaps it's possible to use directly the TDMs instead of building so sparse N-wordgrams count tables)
+
+The algorithm is as follows:
+
+- Take as input N-1 words
+- Use them to:
+    + Return the most frequent word (or sample one if 2 or more have the same frequency)
+    + Or sample 1 word from the N-1 bigram row in the N-wordgram probability table taking the probabilities in this row as weigths:
+
+Next word = sample(colnames, 
+                   size = 1, prob = probabilities in the row of N-1 bigram)
+                   
+Back off: If the N-1 bigram is not found (or if its probability is very low ???) in the  N-wordgram probability table, repeat the process with the  N-2 wordgram probability table and with the N-2 last input words (and so on)
+
+If we arrive to the unigram probability table and no result is found, return "Next word probably not in my training dictionary".
+
+If we can work just with the TDMs, as they are not too big, we could use N=4 or even N=5.
+
+B - *Smoothing + back off/Interpolation Kneser-Ney algorithm*
+
+*See  [video](https://class.coursera.org/nlp/lecture/20) and  [slides](https://d396qusza40orc.cloudfront.net/nlp/slides/02-01-advKnesNeySmooth.pdf) about  Kneser-Ney Smoothing*.
+
+With this algorithm we end up with a smoothed N-wordgram probability table (no zeros). The probabilities of the original zeros is obtaining discounting from the original seen N-grams probabilities following an elegant backoff/interpolation strategy.
+
+Difficulties can arise from the fact that this N-wordgram probability table could be really huge. A RAM estimation is needed to choose N.
+
+In this case we just have to sample 1 word from the N-1 bigram row in the N-wordgram probability table taking the probabilities in this row as weigths:
+
+Next word = sample(colnames, 
+                   size = 1, prob = probabilities in the row of N-1 bigram)
+                   
+Only in case no result is found we should return "Next word probably not in my training dictionary".
+
+
+4- **Test** and **Evaluate model**
+
+Accuracy and perplexity measures of N-grams models trained on the training set will be taken on the test set.
+
+This cycle will be developed completely with the easier prediction algorithm in order to build a shiny application as soon as possible. If time is left, the second prediction algorithm will be implemented and compared to the first one.
+  
+## <a name="algorithm">6. Implementing a first simple back off prediction algorithm</a>
+
+This is the current situation of the development of the algorithm:
+
+1. **Training and testing sample files** have been created for each blogs, news and twitter data files. Training files = 80 % and testing files = 20 % of each data file.
+
+2. **Training**. For each training file a sample has been created.
+    
+    + Determining dictionaries
+Each sample has been tokenized, after processing punctuation, in order to obtain 1-grams TDMs. Stats has been calculated to determine how many counts are necessary to retain a token in a dictionary (criteria: 95% token coverage). Based on that, dictionaries have been created.
+
+    + After that, all tokens not in the dictionary have been reemplaced in the whole corpus by the label $<UNK>$.
+
+    + Next, new TDMs have been calculated, now for 1,2,3 and 4-grams. In the case of 2, 3 and 4-grams, pseudo-words have been added at the beggining and at the end oeach line.
+
+    + From these TDMs, Table Frequency Lists (TFLs) have been derived and stored as data.table's. Now we have a model (4 TFLs each: 1, 2, 3 and 4-grams) for Blogs, News and Twitter documents and for the whole Corpus. Blogs, News and Twitter models use 40 Mbytes data tables and Corpus model, 70 Mbytes.
+
+    + A prediction function have been implemented, following a simple back off algorithm beginning with 4-grams.
+
+3. **Testing**. We have built 4-gram TFLs (for Blogs, News, Twitter and whole Corpus) from the test set. The prediction function, with the appropiated model, is feeded by the first three tokens of each testing 4-gram and the prediction is compared with the fourth token.  Accuracy will be measured carrying out 100 times 1000 predictions, to calculate an average and a confidence interval.
+The models and prediction function are been tested nowadays.   
+
+4. **Evaluation**. The four models (Blogs, News, Twitter and Corpus) accuracies will be evaluated against its respective testing sets in the two modes explained above (with and without final weighted sampling).
+
+5. **Further work**
+After implementing this models in a Shiny application, a new model (Kneser-Ney algorithm) will be implemented, evaluated and compared with the actual models before adding it to the Shiny application.
+
+
+
+[1]:http://www.corpora.heliohost.org/
+[2]:http://www.corpora.heliohost.org/aboutcorpus.html
+[3]:https://en.wikipedia.org/wiki/Natural_language_processing
+[4]:http://www.jstatsoft.org/v25/i05/
+[5]:http://cran.r-project.org/web/views/NaturalLanguageProcessing.html
+[6]:https://www.coursera.org/course/nlp
+[7]:https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip
+[8]:https://class.coursera.org/dsscapstone-003/lecture/5
+[9]:http://en.wikipedia.org/wiki/Zipf%27s_law
+[10]: http://zipfr.r-forge.r-project.org/materials/ESSLLI/
+[11]:http://zipfr.r-forge.r-project.org/materials/ESSLLI/03_lnre_modelin
+[12]:http://en.wikibooks.org/wiki/R_Programming/Text_Processing
+[13]:https://lagunita.stanford.edu/c4x/Engineering/CS-224N/asset/slp4.pdf
+[14]:http://cran.r-project.org/web/packages/tm/vignettes/tm.pdf
+[15]:http://zipfr.r-forge.r-project.org/
+[16]: http://cran.r-project.org/web/packages/data.table/vignettes/datatable-intro.pdf
+[17]:http://en.wikipedia.org/wiki/Heaps%27_law
